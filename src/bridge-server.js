@@ -4,7 +4,7 @@
 // 本文件为等价重写：零原生依赖，纯 Node 内置模块。
 //
 // 监听：
-//   :18765  WebSocket —— 浏览器扩展(tmwd_cdp_bridge)主动连入
+//   :18765  WebSocket —— 浏览器扩展(CDP Bridge 扩展)主动连入
 //   :18765  HTTP GET  —— 扩展的存活探测 fetch('http://127.0.0.1:18765')
 //   :18766  HTTP API  —— 控制面，供 MCP stdio 进程调用
 //

@@ -2,7 +2,7 @@
 //
 // 相对原版的改动：
 //  1. 所有会「无限挂起」的 API 调用都加了超时竞速（withTimeout）。
-//     在海泰浏览器上 chrome.scripting.executeScript 与 chrome.debugger.* 会
+//     在部分国产内核浏览器上 chrome.scripting.executeScript 与 chrome.debugger.* 会
 //     既不 resolve 也不 reject，原版会永远卡死。
 //  2. 执行 JS 改为三级降级：
 //       scripting（官方路径） -> 内容脚本通道（chrome.tabs.sendMessage）
@@ -68,9 +68,9 @@ function stripCspHeaders() {
         ]},
         condition: { urlFilter: '*', resourceTypes: ['main_frame', 'sub_frame'] }
       }]
-    }, () => { if (chrome.runtime.lastError) console.log('[TMWD] CSP rule error: ' + chrome.runtime.lastError.message); });
+    }, () => { if (chrome.runtime.lastError) console.log('[CDP-Bridge] CSP rule error: ' + chrome.runtime.lastError.message); });
   } catch (e) {
-    console.log('[TMWD] CSP rule exception: ' + e.message);
+    console.log('[CDP-Bridge] CSP rule exception: ' + e.message);
   }
 }
 stripCspHeaders();
@@ -222,7 +222,7 @@ async function execViaContentScript(tabId, code, ms) {
   // 内容脚本未注入（常见于扩展重载后，已打开的旧页面不会重新注入 content script）
   // -> 自动刷新该标签页，等加载完成后重试一次。
   if (!r.__ok && NEED_RELOAD.test(String(r.e))) {
-    console.log('[TMWD] content script missing on tab ' + tabId + ', reloading page once...');
+    console.log('[CDP-Bridge] content script missing on tab ' + tabId + ', reloading page once...');
     const rl = await withTimeout(chrome.tabs.reload(tabId), 10000, 'chrome.tabs.reload');
     if (rl.__ok || String(rl.e).indexOf('TIMEOUT') === 0) {
       await waitForTabComplete(tabId, 20000);
@@ -456,7 +456,7 @@ async function handleExtMessage(msg, sender) {
         if (!r.__ok) return { ok: false, error: r.e };
         return { ok: true };
       } else if (msg.method === 'create' || msg.method === 'open') {
-        // 海泰内核：chrome.tabs.create 会挂起 -> 多路 fallback（依次：tabs.create -> windows.create -> 当前 tab update）
+        // 部分国产内核：chrome.tabs.create 会挂起 -> 多路 fallback（依次：tabs.create -> windows.create -> 当前 tab update）
         const url = msg.url;
         let r1 = { ok: false, error: 'not tried' };
         try {
@@ -481,6 +481,18 @@ async function handleExtMessage(msg, sender) {
           return { ok: true, data: { id: cur.id, url, via: 'same-tab', note: 'tabs.create/windows.create unavailable on this kernel' } };
         }
         return { ok: false, error: 'no way to open url: ' + (r1.error || '') + ' / ' + (r2.error || '') };
+      } else if (msg.method === 'close') {
+        // chrome.tabs.remove 在部分国产内核上不可用/挂起 -> 多路 fallback
+        const tid = msg.tabId;
+        if (tid === undefined || tid === null) return { ok: false, error: 'tabId required' };
+        const r1 = await withTimeout(chrome.tabs.remove(tid), 4000, 'tabs.remove');
+        if (r1 && r1.__ok) return { ok: true, data: { id: tid, via: 'tabs.remove' } };
+        // 回退：让页面自己 window.close()（content script 通道）
+        const r2 = await withTimeout(
+          chrome.tabs.sendMessage(tid, { __tmwd_eval: true, code: 'window.close(); "closing"', timeout: 4000 }),
+          8000, 'content-script window.close');
+        if (r2 && r2.__ok && r2.v && r2.v.ok) return { ok: true, data: { id: tid, via: 'content-script window.close' } };
+        return { ok: false, error: 'close failed: ' + ((r1 && r1.e) || '') + ' / ' + ((r2 && r2.e) || 'content script no response') };
       } else {
         const tabs = (await chrome.tabs.query({})).filter(t => isScriptable(t.url));
         const data = tabs.map(t => ({ id: t.id, url: t.url, title: t.title, active: t.active, windowId: t.windowId }));
@@ -680,7 +692,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === 'tmwd-ws-probe') {
     if (ws && ws.readyState <= 1) return;
     if (await isServerAlive()) {
-      console.log('[TMWD-WS] Server detected, connecting...');
+      console.log('[CDP-Bridge] Server detected, connecting...');
       connectWS();
     } else {
       scheduleProbe();
@@ -690,7 +702,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
 async function handleWsExec(data) {
   const tabId = data.tabId;
-  console.log('[TMWD-WS] Exec request', data.id, 'on tab', tabId);
+  console.log('[CDP-Bridge] Exec request', data.id, 'on tab', tabId);
   try { ws.send(JSON.stringify({ type: 'ack', id: data.id })); } catch (_) {}
   if (!tabId) {
     try { ws.send(JSON.stringify({ type: 'error', id: data.id, error: 'No tabId provided' })); } catch (_) {}
@@ -782,7 +794,7 @@ async function handleWsExec(data) {
 // 结构化 DOM 命令（WS 入口）：content script 执行，无 eval
 async function handleWsDom(data) {
   const tabId = data.tabId;
-  console.log('[TMWD-WS] DOM request', data.id, JSON.stringify({ action: data.action, args: data.args, tabId }), 'on tab', tabId);
+  console.log('[CDP-Bridge] DOM request', data.id, JSON.stringify({ action: data.action, args: data.args, tabId }), 'on tab', tabId);
   try { ws.send(JSON.stringify({ type: 'ack', id: data.id, echo: { action: data.action } })); } catch (_) {}
   if (!tabId) { try { ws.send(JSON.stringify({ type: 'error', id: data.id, error: 'No tabId provided' })); } catch (_) {} return; }
   const budget = Math.max(4000, Math.min(parseFloat(data.timeout) || 15000, 60000));
@@ -801,7 +813,7 @@ async function handleWsDom(data) {
 
 async function handleWsCapture(data) {
   const tabId = data.tabId;
-  console.log('[TMWD-WS] Capture request', data.id, 'on tab', tabId);
+  console.log('[CDP-Bridge] Capture request', data.id, 'on tab', tabId);
   try { ws.send(JSON.stringify({ type: 'ack', id: data.id })); } catch (_) {}
   if (!tabId) { try { ws.send(JSON.stringify({ type: 'error', id: data.id, error: 'No tabId provided' })); } catch (_) {} return; }
   try {
@@ -818,11 +830,11 @@ async function connectWS() {
   connecting = true;
   ws = null;
   await loadBridgeConfig();
-  console.log('[TMWD-WS] Connecting to', bridgeWsUrl);
+  console.log('[CDP-Bridge] Connecting to', bridgeWsUrl);
   try {
     ws = new WebSocket(bridgeWsUrl);
   } catch (e) {
-    console.error('[TMWD-WS] Constructor error:', e);
+    console.error('[CDP-Bridge] Constructor error:', e);
     ws = null;
     connecting = false;
     scheduleProbe();
@@ -830,13 +842,13 @@ async function connectWS() {
   }
   ws.onopen = async () => {
     connecting = false;
-    console.log('[TMWD-WS] Connected!');
+    console.log('[CDP-Bridge] Connected!');
     scheduleKeepalive();
     const tabs = (await chrome.tabs.query({})).filter(t => isScriptable(t.url));
     const msg = { type: 'ext_ready', tabs: tabs.map(t => ({ id: t.id, url: t.url, title: t.title })) };
     if (bridgeConfig.bridgeToken) msg.token = bridgeConfig.bridgeToken;
     ws.send(JSON.stringify(msg));
-    console.log('[TMWD-WS] Sent ext_ready with', tabs.length, 'tabs');
+    console.log('[CDP-Bridge] Sent ext_ready with', tabs.length, 'tabs');
   };
   ws.onmessage = async (event) => {
     try {
@@ -879,17 +891,17 @@ async function connectWS() {
         }
       }
     } catch (e) {
-      console.error('[TMWD-WS] message parse error', e);
+      console.error('[CDP-Bridge] message parse error', e);
     }
   };
   ws.onclose = () => {
-    console.log('[TMWD-WS] Disconnected');
+    console.log('[CDP-Bridge] Disconnected');
     connecting = false;
     ws = null;
     scheduleProbe();
   };
   ws.onerror = (e) => {
-    console.error('[TMWD-WS] Error:', e);
+    console.error('[CDP-Bridge] Error:', e);
   };
 }
 
@@ -897,6 +909,23 @@ async function connectWS() {
 connectWS();
 chrome.runtime.onStartup.addListener(() => connectWS());
 chrome.runtime.onInstalled.addListener(() => connectWS());
+
+// MV3 的 Service Worker 空闲时会被冻结，chrome.alarms 定时器随之停摆。
+// 结果：桥接服务重启后扩展无法自行重连（表现为 tools/list 有工具，但调用报
+// "No browser tabs connected"）。这里用浏览器事件作为唤醒源——任何用户活动
+// （切换/更新/创建标签页、窗口聚焦）都会唤醒 Service Worker 并重试连接。
+function ensureConnected() {
+  if (ws && ws.readyState === WebSocket.OPEN) return;
+  if (ws && ws.readyState <= 1) return;   // 正在连接中
+  connectWS();
+}
+try {
+  chrome.tabs.onActivated.addListener(() => ensureConnected());
+  chrome.tabs.onUpdated.addListener(() => ensureConnected());
+  chrome.tabs.onCreated.addListener(() => ensureConnected());
+  chrome.tabs.onRemoved.addListener(() => ensureConnected());
+  chrome.windows.onFocusChanged.addListener(() => ensureConnected());
+} catch (_) {}
 
 // Sync tab list on changes
 async function sendTabsUpdate() {
