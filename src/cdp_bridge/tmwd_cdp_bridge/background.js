@@ -1,5 +1,6 @@
 // background.js - CDP Bridge
 try { importScripts('config.js'); } catch (_) {}
+importScripts('semantic.js');
 
 const DEFAULT_BRIDGE_CONFIG = {
   bridgeHost: typeof DEFAULT_BRIDGE_HOST !== 'undefined' ? DEFAULT_BRIDGE_HOST : '127.0.0.1',
@@ -74,6 +75,7 @@ async function handleExtMessage(msg, sender) {
 
   // 业务事件
 
+  if (msg.cmd === 'semantic') return await handleSemantic(msg, sender);
   if (msg.cmd === 'cdp') return await handleCDP(msg, sender);
   if (msg.cmd === 'batch') return await handleBatch(msg, sender);
   if (msg.cmd === 'tabs') {
@@ -129,6 +131,62 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   handleExtMessage(msg, sender).then(sendResponse);
   return true;
 });
+
+async function handleSemantic(msg, sender) {
+  const tabId = Number(msg.tabId || sender.tab?.id);
+  if (!Number.isInteger(tabId) || tabId <= 0) return { ok: false, error: 'No valid tabId provided' };
+  try {
+    const result = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'ISOLATED',
+      func: semanticPageOperation,
+      args: [{
+        method: msg.method,
+        limit: msg.limit,
+        ref: msg.ref,
+        page_revision: msg.page_revision,
+        action: msg.action,
+        value: msg.value
+      }]
+    });
+    const data = result[0]?.result;
+    if (!data) return { ok: false, error: 'No response from page' };
+    if (msg.method === 'act' && data.status === 'success' && data._before_summary) {
+      const before = data._before_summary;
+      await new Promise(resolve => setTimeout(resolve, 120));
+      const afterResult = await Promise.race([
+        chrome.scripting.executeScript({
+          target: { tabId }, world: 'ISOLATED', func: semanticPageOperation,
+          args: [{ method: 'summary' }]
+        }).catch(() => null),
+        new Promise(resolve => setTimeout(() => resolve(null), 2000))
+      ]);
+      const after = afterResult?.[0]?.result;
+      if (after?.status === 'success') {
+        const beforeLines = new Set(before.lines);
+        const afterLines = new Set(after.lines);
+        data.diff = {
+          url_changed: before.url !== after.url,
+          title_changed: before.title !== after.title,
+          added_text: after.lines.filter(line => !beforeLines.has(line)).slice(0, 10),
+          removed_text: before.lines.filter(line => !afterLines.has(line)).slice(0, 10)
+        };
+        data.url_after = after.url;
+      } else {
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          data.diff.url_changed = before.url !== tab.url;
+          data.url_after = tab.url;
+        } catch (_) {}
+      }
+      delete data._before_summary;
+    }
+    data.tab_id = String(tabId);
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e.message || String(e) };
+  }
+}
 
 async function handleBatch(msg, sender) {
   const R = [];

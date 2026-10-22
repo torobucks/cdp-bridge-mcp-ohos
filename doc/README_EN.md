@@ -123,11 +123,13 @@ graph TB
 
 ## Available Tools
 
-The MCP service currently exposes 10 tools:
+The MCP service currently exposes 12 tools:
 
 | Tool | Parameters | Description |
 | --- | --- | --- |
 | `browser_get_tabs` | None | Get all connected browser tabs with their IDs, URLs, and titles, plus the currently active tab |
+| `browser_observe` | `tab_id` (str), `limit` (int) | List visible interactive controls with roles, names, states, positions, short-lived references, and a `page_revision`. Uses the active MCP tab by default; returns up to 150 controls |
+| `browser_act` | `tab_id` (str), `page_revision` (str), `ref` (str), `action` (str), `value` (str) | `click` or `fill` a control returned by `browser_observe`, with the result and page text changes. References are single-use and expire after 60 seconds; observe again when stale |
 | `browser_scan` | `tabs_only` (bool), `switch_tab_id` (str), `text_only` (bool) | Scan the active tab's content. `tabs_only` returns only the tab list to save tokens; `text_only` returns plain text instead of simplified HTML; `switch_tab_id` switches to the given tab before scanning |
 | `browser_execute_js` | `script` (str, required), `switch_tab_id` (str), `no_monitor` (bool) | Execute JavaScript in the browser and capture the return value plus DOM change diff. `no_monitor` skips DOM monitoring for speed; `switch_tab_id` switches to the target tab first |
 | `browser_switch_tab` | `tab_id` (str, required) | Switch the MCP-side active tab (does not change what the user sees in Chrome). Subsequent tool calls will target this tab |
@@ -137,6 +139,8 @@ The MCP service currently exposes 10 tools:
 | `browser_navigate` | `url` (str, required) | Navigate the active tab to a URL |
 | `browser_screenshot` | `tab_id` (str) | Capture a screenshot of the active tab, returns base64-encoded PNG image data |
 | `browser_save_image` | `screenshot_json_str_or_file` (str, required), `output_path` (str) | Save the base64 screenshot data from `browser_screenshot` as a local PNG file. `screenshot_json_str_or_file` is the screenshot JSON string or JSON file path; `output_path` is the output file path or directory |
+
+For semantic actions, call `browser_observe`, select a control `ref`, then pass its `tab_id` and `page_revision` to `browser_act`. Observe again after each action. The current version covers the main document and open Shadow DOM; controls inside iframes are not included.
 
 # Quick Start
 

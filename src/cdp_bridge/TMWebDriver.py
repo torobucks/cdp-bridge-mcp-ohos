@@ -301,6 +301,7 @@ class TMWebDriver:
 
     def execute_js(self, code, timeout=15, session_id=None, token=None) -> Any:
         ctx = self.get_context(token)
+        explicit_session = session_id is not None
         if session_id is None: session_id = ctx.default_session_id
         if self.is_remote:
             _tlog(token, 'remote_execute_js')
@@ -316,6 +317,8 @@ class TMWebDriver:
             time.sleep(3)
             session = ctx.sessions.get(session_id)
             if not session or not session.is_active():
+                if explicit_session:
+                    raise ValueError(f"会话ID {session_id} 未连接")
                 alive_sessions = [s for s in ctx.sessions.values() if s.is_active()]
                 if alive_sessions:
                     session = alive_sessions[0]

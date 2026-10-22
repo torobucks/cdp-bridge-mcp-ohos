@@ -79,6 +79,68 @@ def _extension_command(d: TMWebDriver, cmd: dict[str, Any], tab_id: str | int | 
 
 
 @mcp.tool()
+async def browser_observe(tab_id: str = "", limit: int = 80) -> str:
+    """List visible interactive controls on a tab with short-lived references.
+
+    Args:
+        tab_id: Tab to observe. Uses the active MCP tab if empty.
+        limit: Maximum controls to return, up to 150.
+
+    Returns a page_revision and control refs for browser_act. Observe again after
+    an action, navigation, or a stale-reference response.
+    """
+    token = _get_token()
+    def _run():
+        d = get_driver()
+        sessions = _ensure_sessions(d, token=token)
+        try:
+            if tab_id:
+                session_id, _ = _require_tab(d, tab_id, token=token)
+            else:
+                active_id = d.get_context(token).default_session_id
+                session_id = str(active_id) if any(str(s.get("id")) == str(active_id) for s in sessions) else str(sessions[0]["id"])
+            result = _extension_command(
+                d, {"cmd": "semantic", "method": "observe", "limit": limit},
+                tab_id=session_id, timeout=10, token=token,
+            )
+            return json.dumps(result, ensure_ascii=False, default=str)
+        except ValueError as e:
+            return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
+async def browser_act(tab_id: str, page_revision: str, ref: str, action: str, value: str = "") -> str:
+    """Click or fill one control returned by browser_observe.
+
+    Args:
+        tab_id: Tab ID returned by browser_observe.
+        page_revision: Revision returned by browser_observe.
+        ref: Control reference returned by browser_observe.
+        action: Either "click" or "fill".
+        value: Text to enter for "fill".
+
+    References are single-use and expire after 60 seconds. A stale result means
+    the page or target changed; call browser_observe again.
+    """
+    token = _get_token()
+    def _run():
+        d = get_driver()
+        try:
+            session_id, _ = _require_tab(d, tab_id, token=token)
+            result = _extension_command(
+                d,
+                {"cmd": "semantic", "method": "act", "page_revision": page_revision,
+                 "ref": ref, "action": action, "value": value},
+                tab_id=session_id, timeout=10, token=token,
+            )
+            return json.dumps(result, ensure_ascii=False, default=str)
+        except ValueError as e:
+            return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
+    return await asyncio.to_thread(_run)
+
+
+@mcp.tool()
 async def browser_get_tabs() -> str:
     """Get all open browser tabs with their IDs, URLs, and titles."""
     token = _get_token()
@@ -106,12 +168,13 @@ async def browser_scan(tabs_only: bool = False, switch_tab_id: str = "", text_on
     def _run():
         d = get_driver()
         ctx = d.get_context(token)
+        session_id = None
         if len(d.get_all_sessions(token=token)) == 0:
             return json.dumps({"status": "error", "msg": "No browser tabs connected. Ensure Chrome extension is running."}, ensure_ascii=False)
 
         if switch_tab_id:
             try:
-                _select_tab(d, switch_tab_id, token=token)
+                session_id, _ = _select_tab(d, switch_tab_id, token=token)
             except ValueError as e:
                 return json.dumps({"status": "error", "msg": str(e)}, ensure_ascii=False)
 
@@ -128,7 +191,7 @@ async def browser_scan(tabs_only: bool = False, switch_tab_id: str = "", text_on
         }
         if not tabs_only:
             importlib.reload(simphtml)
-            result["content"] = simphtml.get_html(d, cutlist=True, maxchars=35000, text_only=text_only, token=token)
+            result["content"] = simphtml.get_html(d, cutlist=True, maxchars=35000, text_only=text_only, token=token, session_id=session_id)
         return json.dumps(result, ensure_ascii=False, default=str)
     return await asyncio.to_thread(_run)
 
@@ -145,15 +208,16 @@ async def browser_execute_js(script: str, switch_tab_id: str = "", no_monitor: b
     token = _get_token()
     def _run():
         d = get_driver()
+        session_id = None
         if len(d.get_all_sessions(token=token)) == 0:
             return json.dumps({"status": "error", "msg": "No browser tabs connected."}, ensure_ascii=False)
         if switch_tab_id:
             try:
-                _select_tab(d, switch_tab_id, token=token)
+                session_id, _ = _select_tab(d, switch_tab_id, token=token)
             except ValueError as e:
                 return json.dumps({"status": "error", "msg": str(e)}, ensure_ascii=False)
         importlib.reload(simphtml)
-        result = simphtml.execute_js_rich(script, d, no_monitor=no_monitor, token=token)
+        result = simphtml.execute_js_rich(script, d, no_monitor=no_monitor, token=token, session_id=session_id)
         return json.dumps(result, ensure_ascii=False, default=str)
     return await asyncio.to_thread(_run)
 
@@ -261,10 +325,11 @@ async def browser_wait(condition_js: str, timeout: float = 10, interval: float =
     def _run():
         d = get_driver()
         ctx = d.get_context(token)
+        session_id = None
         _ensure_sessions(d, token=token)
         if switch_tab_id:
             try:
-                _select_tab(d, switch_tab_id, token=token)
+                session_id, _ = _select_tab(d, switch_tab_id, token=token)
             except ValueError as e:
                 return json.dumps({"status": "error", "msg": str(e)}, ensure_ascii=False)
         deadline = time.time() + max(timeout, 0)
@@ -274,7 +339,7 @@ async def browser_wait(condition_js: str, timeout: float = 10, interval: float =
         while True:
             attempts += 1
             try:
-                response = d.execute_js(condition_js, timeout=min(max(interval, 0.2), 5), token=token)
+                response = d.execute_js(condition_js, timeout=min(max(interval, 0.2), 5), token=token, session_id=session_id)
                 last_value = response.get("data", response.get("result"))
                 last_error = None
                 if last_value:
@@ -282,7 +347,7 @@ async def browser_wait(condition_js: str, timeout: float = 10, interval: float =
                         "status": "success",
                         "value": last_value,
                         "attempts": attempts,
-                        "tab_id": ctx.default_session_id,
+                        "tab_id": session_id if session_id is not None else ctx.default_session_id,
                     }, ensure_ascii=False, default=str)
             except Exception as e:
                 last_error = str(e)
@@ -292,7 +357,7 @@ async def browser_wait(condition_js: str, timeout: float = 10, interval: float =
                     "value": last_value,
                     "error": last_error,
                     "attempts": attempts,
-                    "tab_id": ctx.default_session_id,
+                    "tab_id": session_id if session_id is not None else ctx.default_session_id,
                 }, ensure_ascii=False, default=str)
             time.sleep(max(interval, 0.1))
     return await asyncio.to_thread(_run)
